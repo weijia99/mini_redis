@@ -7,16 +7,17 @@ type Responder<T> = oneshot::Sender<mini_redis::Result<T>>;
 enum Command{
     Get {
         key:String,
-        // resp:Responder<Option<Bytes>>
+        resp:Responder<Option<Bytes>>
     },
     Set{
         key: String,
         val: Bytes,
+        resp:Responder<()>
     }
 }
 
 #[tokio::main]
-async fn main(){
+async fn main() {
     let (tx,mut rx) = mpsc::channel(32);
     // define a channel with a buffer size of 32
     let manager = tokio::spawn(async move{
@@ -24,11 +25,15 @@ async fn main(){
         while let Some(cmd) =rx.recv().await  {
             use Command::*;
             match cmd {
-                Get {key} => {
-                    client.get(&key).await;
+                Get {key,resp} => {
+                    let res = client.get(&key).await;
+                    let _ = resp.send(res);
+                    // send the response back to the requester
+                    // use mpsc to send the response,then use oneshot to send the response back to the requester
                 }
-                Set { key, val } =>{
-                    client.set(&key,val);
+                Set { key, val,resp } =>{
+                   let res = client.set(&key,val).await;
+                   let _ = resp.send(res);
                 }
             }
             
@@ -37,12 +42,27 @@ async fn main(){
     // add 2 tasks 
     let tx2 =tx.clone();
     let t1= tokio::spawn(async move{
-        let cmd =Command::Get { key: "hello".to_string(), };
-        tx.send(cmd).await.unwrap();
+        let (resp_tx,resp_rx) = oneshot::channel();
+        let cmd =Command::Get { key: "foo".to_string(),resp:resp_tx };
+        if tx.send(cmd).await.is_err() {
+            eprint!("connection task shutdown");
+            return;
+        }
+        let res = resp_rx.await.unwrap();
+        // wait for the response
+        println!("GOT (Get) = {:?}", res);
     });
     let t2 = tokio::spawn(async move{
-        let cmd = Command::Set { key: "foo".to_string(), val: "bar".into(), };
-        tx2.send(cmd).await.unwrap();
+        let (resp_tx,resp_rx) = oneshot::channel();
+
+        let cmd = Command::Set { key: "foo".to_string(), val: "bar".into(),resp:resp_tx };
+        if tx2.send(cmd).await.is_err() {
+            eprint!("connection task shutdown");
+            return;
+        }
+        let res = resp_rx.await.unwrap();
+        // wait for the response
+        println!("GOT (Set) = {:?}", res);
     });
 
     // In a certain order, wait for the tasks to complete
